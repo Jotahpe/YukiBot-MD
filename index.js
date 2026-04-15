@@ -1,3 +1,6 @@
+   import express from 'express';
+   express().get('/', (r, s) => s.send('YuKiBot Online')).listen(process.env.PORT || 3000, () => console.log('Puerto para Render OK'));
+
 import "./settings.js";
 import main from './main.js';
 import events from './cmds/events.js';
