@@ -5,44 +5,28 @@ import path from 'path'
 import chalk from 'chalk'
 import { Boom } from '@hapi/boom'
 import { fileURLToPath, pathToFileURL } from 'url'
-import { platform } from 'process'
 import NodeCache from 'node-cache'
+import http from 'http'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const sessionsFolder = './Sessions/Owner'
-const maxCache = 100
+
+// BORRA SESSIONS SI ESTÁ CORRUPTA
+if (fs.existsSync(sessionsFolder)) {
+    console.log('Limpiando sesión vieja...');
+    fs.rmSync(sessionsFolder, { recursive: true, force: true });
+}
+fs.mkdirSync(sessionsFolder, { recursive: true });
 
 console.log('❀ Iniciando...')
 console.log('Yuki Suou')
 console.log('Made with love by Destroy')
 
-if (!fs.existsSync(sessionsFolder)) {
-    fs.mkdirSync(sessionsFolder, { recursive: true });
-}
-
-function getFolderSizeMB(folder) {
-    if (!fs.existsSync(folder)) return 0;
-    const files = fs.readdirSync(folder);
-    let total = 0;
-    for (const file of files) {
-        const stat = fs.statSync(path.join(folder, file));
-        if (stat.isFile()) total += stat.size;
-    }
-    return total / 1024 / 1024;
-}
-
-const sizeMB = getFolderSizeMB(sessionsFolder);
-if (sizeMB > maxCache) {
-    console.log(chalk.yellow(`[ Δ ] Sessions ${sizeMB}MB > ${maxCache}MB - Limpiando...`))
-    fs.rmSync(sessionsFolder, { recursive: true, force: true });
-    fs.mkdirSync(sessionsFolder, { recursive: true });
-}
-
 let opcion = "2";
 let phoneNumber = "528133791894";
-let phoneInput = phoneNumber;
 let reconexion = 0;
-const intentos = 15;
+const intentos = 5; // Solo 5 intentos para no spamear códigos
+let codigoGenerado = false; // FLAG: Solo 1 código
 
 const msgRetryCounterCache = new NodeCache()
 
@@ -68,74 +52,59 @@ async function startBot() {
     global.client = sock;
     global.conn = sock;
 
-    const pluginFolder = path.join(__dirname, './cmds');
-    if (fs.existsSync(pluginFolder)) {
-        const pluginFilter = filename => /\.js$/.test(filename);
-        global.plugins = {};
-
-        for (let filename of fs.readdirSync(pluginFolder).filter(pluginFilter)) {
-            try {
-                let file = path.join(pluginFolder, filename);
-                const module = await import(pathToFileURL(file).href);
-                global.plugins[filename] = module.default || module;
-            } catch (e) {
-                console.error(`Error al cargar plugin ${filename}:`, e);
-            }
-        }
-    }
-
-    if (opcion === "2" &&!sock.authState.creds.registered) {
+    // GENERA CÓDIGO SOLO 1 VEZ
+    if (opcion === "2" && !sock.authState.creds.registered && !codigoGenerado) {
+        codigoGenerado = true; // Ya no genera más
         setTimeout(async () => {
             try {
-                let code = await sock.requestPairingCode(phoneInput);
+                let code = await sock.requestPairingCode(phoneNumber);
                 code = code?.match(/.{1,4}/g)?.join("-") || code;
-                console.log(chalk.bgGreen.black(' Código de emparejamiento: '), chalk.white(code));
+                console.log(chalk.bgGreen.black(' >>> CÓDIGO DE EMPAREJAMIENTO: '), chalk.white.bold(code));
+                console.log(chalk.yellow('>>> Tienes 2 minutos para meterlo en WhatsApp'));
             } catch (e) {
                 console.log('Error generando código:', e);
+                codigoGenerado = false; // Si falla, permite reintentar
             }
         }, 3000);
     }
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
+
         if (connection === 'open') {
-            console.log(chalk.green('Bot conectado correctamente'));
+            console.log(chalk.green('>>> Bot conectado correctamente. Ya puedes cerrar Render si quieres'));
             reconexion = 0;
         }
+
         if (connection === 'close') {
             let reason = new Boom(lastDisconnect?.error)?.output.statusCode;
-            if (reason === DisconnectReason.badSession) {
-                console.log(chalk.red('Sesión incorrecta, borra Sessions y reescanea'));
-            } else if (reason === DisconnectReason.connectionClosed) {
-                console.log(chalk.yellow('Conexión cerrada, reconectando...'));
-                startBot();
-            } else if (reason === DisconnectReason.connectionLost) {
-                console.log(chalk.yellow('Conexión perdida, reconectando...'));
-                startBot();
-            } else if (reason === DisconnectReason.loggedOut) {
-                console.log(chalk.red('Sesión cerrada, borra Sessions y reescanea'));
+            
+            if (reason === DisconnectReason.loggedOut) {
+                console.log(chalk.red('>>> Sesión cerrada. Borra carpeta Sessions y reinicia'));
                 fs.rmSync(sessionsFolder, { recursive: true, force: true });
-            } else if (reason === DisconnectReason.restartRequired) {
-                console.log(chalk.cyan('Reinicio requerido, reiniciando...'));
-                startBot();
+                return; // NO RECONECTA para no spamear códigos
+            } 
+            
+            if (reconexion < intentos) {
+                reconexion++;
+                console.log(chalk.yellow(`>>> Reconectando... Intento ${reconexion}/${intentos}`));
+                setTimeout(startBot, 5000);
             } else {
-                console.log(chalk.red(`Desconectado por razón desconocida: ${reason}`));
-                if (reconexion < intentos) {
-                    reconexion++;
-                    startBot();
-                }
+                console.log(chalk.red('>>> Demasiados intentos. Reinicia el deploy manual'));
             }
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
-
-    try {
-        const handler = await import('./core/handler.js');
-        sock.ev.on('messages.upsert', handler.default.bind(sock));
-    } catch (e) {
-        console.log('No se encontró handler.js, usando básico');
-    }
 }
 
 startBot();
+
+// PUERTO FALSO PARA QUE RENDER NO MATE EL PROCESO
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('YukiBot Online - No cerrar');
+});
+server.listen(process.env.PORT || 3000, () => {
+    console.log('>>> Puerto abierto para Render');
+}); 
