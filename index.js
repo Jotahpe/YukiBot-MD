@@ -136,10 +136,9 @@ function cleanCache() {
   }
 }
 
-let opcion = "2";
-let phoneNumber = "528133791894";
-let phoneInput = phoneNumber;
-
+   let opcion = "2";
+   let phoneNumber = "528133791894";
+   let phoneInput = phoneNumber;
 let reconexion = 0;
 const intentos = 15;
 async function startBot() {
