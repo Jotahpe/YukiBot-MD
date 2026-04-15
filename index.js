@@ -1,289 +1,293 @@
-   import express from 'express';
-   express().get('/', (r, s) => s.send('YuKiBot Online')).listen(process.env.PORT || 3000, () => console.log('Puerto para Render OK'));
+import { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, Browsers, DisconnectReason } from '@whiskeysockets/baileys'
+import pino from 'pino'
+import fs from 'fs'
+import path from 'path'
+import chalk from 'chalk'
+import { Boom } from '@hapi/boom'
+import { fileURLToPath, pathToFileURL } from 'url'
+import { platform } from 'process'
+import NodeCache from 'node-cache'
 
-import "./settings.js";
-import main from './main.js';
-import events from './cmds/events.js';
-import { Browsers, makeWASocket, makeCacheableSignalKeyStore, useMultiFileAuthState, fetchLatestBaileysVersion, jidDecode, DisconnectReason } from "@whiskeysockets/baileys";
-import cfonts from 'cfonts';
-import pino from "pino";
-import qrcode from "qrcode-terminal";
-import chalk from "chalk";
-import fs from "fs";
-import path from "path";
-import readlineSync from "readline-sync";
-import os from "os";
-import { smsg } from "./core/message.js";
-import db from "./core/system/database.js";
-import { startSubBot } from './core/subs.js';
-import { exec } from "child_process";
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const sessionsFolder = './Sessions/Owner'
+const maxCache = 100
 
-const log = {
-  info: (msg) => console.log(chalk.bgBlue.white.bold(`INFO`), chalk.white(msg)),
-  success: (msg) => console.log(chalk.bgGreen.white.bold(`SUCCESS`), chalk.greenBright(msg)),
-  warn: (msg) => console.log(chalk.bgYellowBright.blueBright.bold(`WARNING`), chalk.yellow(msg)),
-  warning: (msg) => console.log(chalk.bgYellowBright.red.bold(`WARNING`), chalk.yellow(msg)),
-  error: (msg) => console.log(chalk.bgRed.white.bold(`ERROR`), chalk.redBright(msg))
-};
+console.log('❀ Iniciando...')
+console.log('Yuki Suou')
+console.log('Made with love by Destroy')
 
-const maxCache = 100;
-let phoneNumber = global.botNumber || "";
-let phoneInput = "";
-const methodCodeQR = process.argv.includes("--qr");
-const methodCode = process.argv.includes("code");
-const DIGITS = (s = "") => String(s).replace(/\D/g, "");
-
-function normalizePhoneForPairing(input) {
-  let s = DIGITS(input);
-  if (!s) return "";
-  if (s.startsWith("0")) s = s.replace(/^0+/, "");
-  if (s.length === 10 && s.startsWith("3")) s = "57" + s;
-  if (s.startsWith("52") && !s.startsWith("521") && s.length >= 12) s = "521" + s.slice(2);
-  if (s.startsWith("54") && !s.startsWith("549") && s.length >= 11) s = "549" + s.slice(2);
-  return s;
+if (!fs.existsSync(sessionsFolder)) {
+    fs.mkdirSync(sessionsFolder, { recursive: true });
 }
 
-const { say } = cfonts
-console.log(chalk.magentaBright('\n❀ Iniciando...'))
-  say('Yuki Suou', {
-  align: 'center',           
-  gradient: ['red', 'blue'] 
-})
-  say('Made with love by Destroy', {
-  font: 'console',
-  align: 'center',
-  gradient: ['blue', 'magenta']
-})
-
-const botTypes = [
-  { name: 'SubBot', folder: './Sessions/Subs', starter: startSubBot }
-];
-
-if (!fs.existsSync('./tmp')) fs.mkdirSync('./tmp', { recursive: true });
-global.conns = global.conns || [];
-const reconnecting = new Set();
-
-async function loadBots() {
-  for (const { name, folder, starter } of botTypes) {
-    if (!fs.existsSync(folder)) continue;
-    const botIds = fs.readdirSync(folder);
-    for (const userId of botIds) {
-      const sessionPath = path.join(folder, userId);
-      const credsPath = path.join(sessionPath, 'creds.json');
-      if (!fs.existsSync(credsPath)) continue;
-      if (global.conns.some((conn) => conn.userId === userId)) continue;
-      if (reconnecting.has(userId)) continue;
-      try {
-        reconnecting.add(userId);
-        await starter(null, null, 'Auto reconexión', false, userId, sessionPath);
-      } catch (e) {
-        console.log(chalk.gray(`[ loadBots ] Error iniciando ${name} ${userId}: ${e?.message || e}`));
-      } finally {
-        reconnecting.delete(userId);
-      }
-      await new Promise((res) => setTimeout(res, 2500));
+function getFolderSizeMB(folder) {
+    if (!fs.existsSync(folder)) return 0;
+    const files = fs.readdirSync(folder);
+    let total = 0;
+    for (const file of files) {
+        const stat = fs.statSync(path.join(folder, file));
+        if (stat.isFile()) total += stat.size;
     }
-  }
-  setTimeout(loadBots, 60 * 1000);
+    return total / 1024 / 1024;
 }
 
-function cleanCache() {
-  try {
-    const tmpFolder = './tmp';
-    if (fs.existsSync(tmpFolder)) {
-      const files = fs.readdirSync(tmpFolder);
-      let cleaned = 0;
-      for (const file of files) {
-        try { fs.unlinkSync(path.join(tmpFolder, file)); cleaned++; } catch {}
-      }
-      if (cleaned > 0) console.log(chalk.gray(`[ 🗑️ ] Cache tmp: ${cleaned} archivos eliminados`));
-    }
-    const sessionsFolder = './Sessions';
-    if (fs.existsSync(sessionsFolder)) {
-      const getFolderSizeMB = (dir) => {
-        let total = 0;
-        for (const file of fs.readdirSync(dir)) {
-          try {
-            const filePath = path.join(dir, file);
-            const stat = fs.statSync(filePath);
-            total += stat.isDirectory() ? getFolderSizeMB(filePath) : stat.size;
-          } catch {}
-        }
-        return total / (1024 * 1024);
-      };
-      const sizeMB = getFolderSizeMB(sessionsFolder);
-      if (sizeMB > maxCache) {
-        console.log(chalk.yellow(`[ ⚠ ] Sessions ${sizeMB.toFixed(1)}MB — limpiando...`));
-        const safeDelete = (dir) => {
-          for (const file of fs.readdirSync(dir)) {
-            const filePath = path.join(dir, file);
-            const stat = fs.statSync(filePath);
-            if (stat.isDirectory()) {
-              safeDelete(filePath);
-            } else if (!file.includes('creds') && !file.startsWith('session-')) {
-              try { fs.unlinkSync(filePath); } catch {}
-            }
-          }
-        };
-        for (const botType of ['Owner', 'Subs']) {
-          const botFolder = path.join(sessionsFolder, botType);
-          if (fs.existsSync(botFolder)) safeDelete(botFolder);
-        }
-      }
-    }
-  } catch (e) {
-    console.error(chalk.red('Error en cleanCache: '), e);
-  }
+const sizeMB = getFolderSizeMB(sessionsFolder);
+if (sizeMB > maxCache) {
+    console.log(chalk.yellow(`[ Δ ] Sessions ${sizeMB}MB > ${maxCache}MB - Limpiando...`))
+    fs.rmSync(sessionsFolder, { recursive: true, force: true });
+    fs.mkdirSync(sessionsFolder, { recursive: true });
 }
 
-   let opcion = "2";
-   let phoneNumber = "528133791894";
-   let phoneInput = phoneNumber;
+// FORZADO: Opción 2 = pairing code con tu número
+let opcion = "2";
+let phoneNumber = "528133791894"; // ARREGLADO: Solo 1 declaración
+let phoneInput = phoneNumber;
 let reconexion = 0;
 const intentos = 15;
+
+const msgRetryCounterCache = new NodeCache()
+
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState(global.sessionName);
-  const { version } = await fetchLatestBaileysVersion();
-  const logger = pino({ level: "silent" });
-  console.info = () => {};
-  console.debug = () => {};
-  const sock = makeWASocket({
-    version,
-    logger,
-    printQRInTerminal: false,
-    browser: Browsers.macOS('Chrome'),
-    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-    markOnlineOnConnect: false,
-    generateHighQualityLinkPreview: true,
-    syncFullHistory: false,
-    getMessage: async () => "",
-    keepAliveIntervalMs: 45000,
-    maxIdleTimeMs: 60000,
-  });
-  global.client = sock;
-  sock.isInit = false;
-  sock.ev.on("creds.update", saveCreds);
+    const { state, saveCreds } = await useMultiFileAuthState(sessionsFolder);
+    const { version } = await fetchLatestBaileysVersion();
+    const logger = pino({ level: "silent" });
 
-  if (opcion === "2" && !fs.existsSync("./Sessions/Owner/creds.json")) {
-    setTimeout(async () => {
-      try {
-        if (!state.creds.registered) {
-          const pairing = await global.client.requestPairingCode(phoneNumber);
-          const codeBot = pairing?.match(/.{1,4}/g)?.join("-") || pairing;
-          console.log(chalk.bold.white(chalk.bgMagenta(`Código de emparejamiento:`)), chalk.bold.white(chalk.white(codeBot)));
+    const sock = makeWASocket({
+        version,
+        logger,
+        printQRInTerminal: false,
+        browser: Browsers.macOS('Chrome'),
+        auth: state,
+        msgRetryCounterCache,
+        markOnlineOnConnect: false,
+        generateHighQualityLinkPreview: true,
+        syncFullHistory: false,
+        getMessage: async () => "",
+        keepAliveIntervalMs: 45000,
+    });
+
+    global.client = sock;
+    global.conn = sock;
+
+    // CARGA DE PLUGINS - ya sin tourl.js porque lo borraste
+    const pluginFolder = path.join(__dirname, './cmds');
+    if (fs.existsSync(pluginFolder)) {
+        const pluginFilter = filename => /\.js$/.test(filename);
+        global.plugins = {};
+
+        for (let filename of fs.readdirSync(pluginFolder).filter(pluginFilter)) {
+            try {
+                let file = path.join(pluginFolder, filename);
+                const module = await import(pathToFileURL(file).href);
+                global.plugins[filename] = module.default || module;
+            } catch (e) {
+                console.error(`Error al cargar plugin ${filename}:`, e);
+            }
         }
-      } catch (err) {
-        console.log(chalk.red("Error al generar código:"), err);
-      }
-    }, 3000);
-  }
-
-  sock.sendText = (jid, text, quoted = "", options) => sock.sendMessage(jid, { text, ...options }, { quoted });
-  sock.ev.on("connection.update", async (update) => {
-    const { qr, connection, lastDisconnect, isNewLogin, receivedPendingNotifications } = update;
-    if (qr != 0 && qr != undefined || methodCodeQR) {
-      if (opcion == '1' || methodCodeQR) {
-        console.log(chalk.green.bold("[ ✿ ] Escanea este código QR"));
-        qrcode.generate(qr, { small: true });
-      }
     }
 
-    if (connection === "close") {
-      const reason = lastDisconnect?.error?.output?.statusCode || 0;
-      if (reason === DisconnectReason.loggedOut) {
-        log.warning("Escanee nuevamente y ejecute...");
-        exec("rm -rf ./Sessions/Owner/*");
-        process.exit(1);
-      } else if (reason === DisconnectReason.forbidden) {
-        log.error("Error de conexión, escanee nuevamente y ejecute...");
-        exec("rm -rf ./Sessions/Owner/*");
-        process.exit(1);
-      } else if (reason === DisconnectReason.multideviceMismatch) {
-        log.warning("Inicia nuevamente");
-        exec("rm -rf ./Sessions/Owner/*");
-        process.exit(0);
-      } else if (reason === DisconnectReason.connectionReplaced) {
-        log.warning("Primero cierre la sesión actual...");
-        return;
-      } else {
-        reconexion++;
-        if (reconexion > intentos) {
-          log.error(`Demasiados reintentos (${intentos}). Reinicia el proceso manualmente.`);
-          process.exit(1);
+    // PAIRING CODE FORZADO
+    if (opcion === "2" &&!sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                let code = await sock.requestPairingCode(phoneInput);
+                code = code?.match(/.{1,4}/g)?.join("-") || code;
+                console.log(chalk.bgGreen.black(' Código de emparejamiento: '), chalk.white(code));
+            } catch (e) {
+                console.log('Error generando código:', e);
+            }
+        }, 3000);
+    }
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === 'open') {
+            console.log(chalk.green('Bot conectado correctamente'));
+            reconexion = 0;
         }
-        const delay = Math.min(3000 * reconexion, 30000);
-        if (reason === DisconnectReason.connectionLost) log.warning("Se perdió la conexión al servidor, intento reconectarme..");
-        else if (reason === DisconnectReason.connectionClosed) log.warning("Conexión cerrada, intentando reconectarse...");
-        else if (reason === DisconnectReason.restartRequired) log.warning("Es necesario reiniciar..");
-        else if (reason === DisconnectReason.timedOut) log.warning("Tiempo de conexión agotado, intentando reconectarse...");
-        else if (reason === DisconnectReason.badSession) log.warning("Eliminar sesión y escanear nuevamente...");
-        else log.warning(`Desconexión (${reason}), reconectando...`);
-        setTimeout(startBot, delay);
-      }
-    }
 
-    if (connection === "open") {
-      reconexion = 0;
-      const userName = sock.user.name || "Desconocido";
-      console.log(chalk.green.bold(`[ ✿ ]  Conectado a: ${userName}`));
-    }
-    if (isNewLogin) log.info("Nuevo dispositivo detectado");
-    if (receivedPendingNotifications === true) {
-      log.warn("Por favor espere aproximadamente 1 minuto...");
-      sock.ev.flush();
-    }
-  });
+        if (connection === 'close') {
+            let reason = new Boom(lastDisconnect?.error)?.output.statusCode;
+            if (reason === DisconnectReason.badSession) {
+                console.log(chalk.red('Sesión incorrecta, borra Sessions y reescanea'));
+            } else if (reason === DisconnectReason.connectionClosed) {
+                console.log(chalk.yellow('Conexión cerrada, reconectando...'));
+                startBot();
+            } else if (reason === DisconnectReason.connectionLost) {
+                console.log(chalk.yellow('Conexión perdida, reconectando...'));
+                startBot();
+            } else if (reason === DisconnectReason.loggedOut) {
+                console.log(chalk.red('Sesión cerrada, borra Sessions y reescanea'));
+                fs.rmSync(sessionsFolder, { recursive: true, force: true });
+            } else if (reason === DisconnectReason.restartRequired) {
+                console.log(chalk.cyan('Reinicio requerido, reiniciando...'));
+                startBot();
+            } else {
+                console.log(chalk.red(`Desconectado por razón desconocida: ${reason}`));
+                if (reconexion < intentos) {
+                    reconexion++;
+                    startBot();
+                }
+            }
+        }
+    });
 
-  sock.ev.on('messages.upsert', async (chatUpdate) => {
+    sock.ev.on('creds.update', saveCreds);
+
+    // HANDLER DE MENSAJES - carga el core/handler.js si existe
     try {
-      const kay = chatUpdate.messages[0];
-      if (!kay?.message) return;
-      if (kay.key?.remoteJid === 'status@broadcast') return;
-      kay.message = Object.keys(kay.message)[0] === 'ephemeralMessage' ? kay.message.ephemeralMessage.message : kay.message;
-      if (kay.key.fromMe && kay.key.id.startsWith('3EB0')) return;
-      const m = await smsg(sock, kay);
-      main(sock, m, chatUpdate);
-    } catch (err) {
-      console.log(log.error('Error:'), err);
+        const handler = await import('./core/handler.js');
+        sock.ev.on('messages.upsert', handler.default.bind(sock));
+    } catch (e) {
+        console.log('No se encontró handler.js, usando básico');
     }
-  });
-  try {
-    await events(sock, null);
-  } catch (err) {
-    console.log(chalk.gray(`[ BOT  ]  → ${err}`));
-  }
-
-  sock.decodeJid = (jid) => {
-    if (!jid) return jid;
-    if (/:\d+@/gi.test(jid)) {
-      const decode = jidDecode(jid) || {};
-      return (decode.user && decode.server && decode.user + "@" + decode.server) || jid;
-    }
-    return jid;
-  };
 }
 
-setInterval(cleanCache, 3 * 60 * 60 * 1000);
-cleanCache();
+startBot(); { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, Browsers, DisconnectReason } from '@whiskeysockets/baileys'
+import pino from 'pino'
+import fs from 'fs'
+import path from 'path'
+import chalk from 'chalk'
+import { Boom } from '@hapi/boom'
+import { fileURLToPath, pathToFileURL } from 'url'
+import { platform } from 'process'
+import NodeCache from 'node-cache'
 
-(async () => {
-await loadBots(); 
-})();
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const sessionsFolder = './Sessions/Owner'
+const maxCache = 100
 
-(async () => {
-global.loadDatabase()
-console.log(chalk.gray('[ ✿  ]  Base de datos cargada correctamente.'))
-await startBot();
-})();
+console.log('❀ Iniciando...')
+console.log('Yuki Suou')
+console.log('Made with love by Destroy')
 
-process.on('uncaughtException', (err) => {
-  const msg = err?.message || '';
-  if (msg.includes('rate-overlimit') || msg.includes('timed out') || msg.includes('Connection Closed')) return;
-  console.error(chalk.red('[uncaughtException]'), msg.slice(0, 120));
-});
+if (!fs.existsSync(sessionsFolder)) {
+    fs.mkdirSync(sessionsFolder, { recursive: true });
+}
 
-process.on('unhandledRejection', (reason) => {
-  const msg = String(reason?.message || reason || '');
-  if (msg.includes('rate-overlimit') || msg.includes('timed out') || msg.includes('Connection Closed')) return;
-  console.error(chalk.red('[unhandledRejection]'), msg.slice(0, 120));
-});
+function getFolderSizeMB(folder) {
+    if (!fs.existsSync(folder)) return 0;
+    const files = fs.readdirSync(folder);
+    let total = 0;
+    for (const file of files) {
+        const stat = fs.statSync(path.join(folder, file));
+        if (stat.isFile()) total += stat.size;
+    }
+    return total / 1024 / 1024;
+}
+
+const sizeMB = getFolderSizeMB(sessionsFolder);
+if (sizeMB > maxCache) {
+    console.log(chalk.yellow(`[ Δ ] Sessions ${sizeMB}MB > ${maxCache}MB - Limpiando...`))
+    fs.rmSync(sessionsFolder, { recursive: true, force: true });
+    fs.mkdirSync(sessionsFolder, { recursive: true });
+}
+
+// FORZADO: Opción 2 = pairing code con tu número
+let opcion = "2";
+let phoneNumber = "528133791894"; // ARREGLADO: Solo 1 declaración
+let phoneInput = phoneNumber;
+let reconexion = 0;
+const intentos = 15;
+
+const msgRetryCounterCache = new NodeCache()
+
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState(sessionsFolder);
+    const { version } = await fetchLatestBaileysVersion();
+    const logger = pino({ level: "silent" });
+
+    const sock = makeWASocket({
+        version,
+        logger,
+        printQRInTerminal: false,
+        browser: Browsers.macOS('Chrome'),
+        auth: state,
+        msgRetryCounterCache,
+        markOnlineOnConnect: false,
+        generateHighQualityLinkPreview: true,
+        syncFullHistory: false,
+        getMessage: async () => "",
+        keepAliveIntervalMs: 45000,
+    });
+
+    global.client = sock;
+    global.conn = sock;
+
+    // CARGA DE PLUGINS - ya sin tourl.js porque lo borraste
+    const pluginFolder = path.join(__dirname, './cmds');
+    if (fs.existsSync(pluginFolder)) {
+        const pluginFilter = filename => /\.js$/.test(filename);
+        global.plugins = {};
+
+        for (let filename of fs.readdirSync(pluginFolder).filter(pluginFilter)) {
+            try {
+                let file = path.join(pluginFolder, filename);
+                const module = await import(pathToFileURL(file).href);
+                global.plugins[filename] = module.default || module;
+            } catch (e) {
+                console.error(`Error al cargar plugin ${filename}:`, e);
+            }
+        }
+    }
+
+    // PAIRING CODE FORZADO
+    if (opcion === "2" &&!sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                let code = await sock.requestPairingCode(phoneInput);
+                code = code?.match(/.{1,4}/g)?.join("-") || code;
+                console.log(chalk.bgGreen.black(' Código de emparejamiento: '), chalk.white(code));
+            } catch (e) {
+                console.log('Error generando código:', e);
+            }
+        }, 3000);
+    }
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === 'open') {
+            console.log(chalk.green('Bot conectado correctamente'));
+            reconexion = 0;
+        }
+
+        if (connection === 'close') {
+            let reason = new Boom(lastDisconnect?.error)?.output.statusCode;
+            if (reason === DisconnectReason.badSession) {
+                console.log(chalk.red('Sesión incorrecta, borra Sessions y reescanea'));
+            } else if (reason === DisconnectReason.connectionClosed) {
+                console.log(chalk.yellow('Conexión cerrada, reconectando...'));
+                startBot();
+            } else if (reason === DisconnectReason.connectionLost) {
+                console.log(chalk.yellow('Conexión perdida, reconectando...'));
+                startBot();
+            } else if (reason === DisconnectReason.loggedOut) {
+                console.log(chalk.red('Sesión cerrada, borra Sessions y reescanea'));
+                fs.rmSync(sessionsFolder, { recursive: true, force: true });
+            } else if (reason === DisconnectReason.restartRequired) {
+                console.log(chalk.cyan('Reinicio requerido, reiniciando...'));
+                startBot();
+            } else {
+                console.log(chalk.red(`Desconectado por razón desconocida: ${reason}`));
+                if (reconexion < intentos) {
+                    reconexion++;
+                    startBot();
+                }
+            }
+        }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    // HANDLER DE MENSAJES - carga el core/handler.js si existe
+    try {
+        const handler = await import('./core/handler.js');
+        sock.ev.on('messages.upsert', handler.default.bind(sock));
+    } catch (e) {
+        console.log('No se encontró handler.js, usando básico');
+    }
+}
+
+startBot();
